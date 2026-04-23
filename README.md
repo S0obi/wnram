@@ -1,29 +1,26 @@
-## An in-memory Go Library for WordNet
+# wnram — An In-Memory Go Library for WordNet
 
-This is a go language library for accessing [Princeton's wordnet][].
+A Go library for accessing [Open English WordNet][https://en-word.net] (and Princeton WordNet compatible datasets).
 
 ## Implementation Overview
 
-This library is a native golang parser for wordnet which stores the
-entire thing in RAM.  This approach was taken for faster access times
-because the wordnet database sits in only about 80MB of ram, which is
-not a lot these days.  Parsing the full data files takes around two
-seconds on a modest laptop.
+This library is a native Go parser for WordNet that stores the entire database in RAM.
+This approach gives faster lookup times; the dataset sits at roughly 80–90 MB of RAM,
+which is acceptable for most server environments. Parsing the full data files takes
+around two seconds on a modest laptop.
 
-[Princeton's wordnet]: http://wordnet.princeton.edu
+## Supported Features
 
-## Supported features
-
-* Lookup by term
-* Synonyms
-* All relation types (Antonyms, Hyponyms, Hypernyms, etc)
-* Iteration of the database
-* Lemmatization
-* Morphology - specifically generating a lemma from input text
+- Lookup by term, with automatic morphological normalization (plurals, verb forms, comparatives)
+- Synonyms
+- All relation types (Antonym, Hyponym, Hypernym, Attribute, Entailment, etc.)
+- Iteration over the full database, optionally filtered by part of speech
+- Lemmatization — find the canonical form of a word
+- Morphology — derive a lemma from inflected input text
 
 ## Example Usage
 
-```golang
+```go
 import (
     "log"
 
@@ -31,19 +28,76 @@ import (
 )
 
 func main() {
-    wn := wnram.New("./path")
-    // lookup "yummy"
-    if found, err := wn.Lookup(Criteria{Matching: "yummy", POS: []PartOfSpeech{Adjective}}); err != nil {
-       log.Fatal("%s", err)
-    } else {
-       // dump details about each matching term to console
-       for _, f := range found {
-           f.Dump()
-       }
-	}
+    wn, err := wnram.New("./path/to/wordnet/data")
+    if err != nil {
+        log.Fatalf("failed to load wordnet: %s", err)
+    }
+
+    // Look up "yummy" restricted to adjectives
+    found, err := wn.Lookup(wnram.Criteria{
+        Matching: "yummy",
+        POS:      wnram.PartOfSpeechList{wnram.Adjective},
+    })
+    if err != nil {
+        log.Fatalf("%s", err)
+    }
+
+    // Dump details about each matching synset to console
+    for _, f := range found {
+        f.Dump()
+    }
 }
 ```
 
-## License
+### Iterating the database
 
-BSD 2 Clause, see `LICENSE`.
+```go
+err := wn.Iterate(wnram.PartOfSpeechList{wnram.Noun}, func(l wnram.Lookup) error {
+    fmt.Println(l.Word(), "—", l.Gloss())
+    return nil
+})
+```
+
+### Querying relations
+
+```go
+found, _ := wn.Lookup(wnram.Criteria{Matching: "good", POS: wnram.PartOfSpeechList{wnram.Adjective}})
+for _, f := range found {
+    for _, a := range f.Related(wnram.Antonym) {
+        fmt.Println("antonym:", a.Word())
+    }
+}
+```
+
+## Developer Guide
+
+### Prerequisites
+
+- Go 1.26 or later
+
+### Getting the WordNet data files
+
+The library ships with [Open English WordNet][https://github.com/globalwordnet/english-wordnet] data in the `data/` folder.
+If you need to update or replace the dataset, place the standard WordNet `data.*`,
+`*.exc`, and index files in `data/` and point `wnram.New()` at it.
+
+### Running the tests
+
+```sh
+go test ./...
+```
+
+With coverage:
+
+```sh
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out   # open coverage report in browser
+```
+
+### Linting
+
+The project uses [golangci-lint](https://golangci-lint.run):
+
+```sh
+golangci-lint run
+```
