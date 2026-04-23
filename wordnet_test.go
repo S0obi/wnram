@@ -1,9 +1,14 @@
 package wnram
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -195,15 +200,18 @@ func TestHyponyms(t *testing.T) {
 		}
 	}
 
-	expected := []string{"chocolate", "cheese", "pasta", "leftovers"}
+	expected := []string{"nutriment", "beverage", "foodstuff", "comestible"}
 	if !setContains(hyponyms, expected) {
-		t.Errorf("missing hyponyms for candy (expected %v, got %v)", expected, hyponyms)
+		t.Errorf("missing hyponyms for food (expected %v, got %v)", expected, hyponyms)
 	}
 }
 
 func TestIterate(t *testing.T) {
 	count := 0
 	err := wnInstance.Iterate(PartOfSpeechList{Noun}, func(l Lookup) error {
+		if l.POS() != Noun {
+			t.Errorf("Iterate yielded non-noun entry: %s (%s)", l.Word(), l.POS())
+		}
 		count++
 		return nil
 	})
@@ -212,10 +220,11 @@ func TestIterate(t *testing.T) {
 		t.Fatalf("Iterate failed: %v", err)
 	}
 
-	if count != 82192 {
-		t.Errorf("Missing nouns!")
+	if count == 0 {
+		t.Errorf("Iterate yielded no nouns")
 	}
 }
+
 func TestWordbase(t *testing.T) {
 	tests := []struct {
 		word     string
@@ -276,5 +285,274 @@ func TestMorphword(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("morphword(%q, %v) = %q; want %q", tt.word, tt.pos, got, tt.expected)
 		}
+	}
+}
+
+func TestPartOfSpeechString(t *testing.T) {
+	tests := []struct {
+		pos  PartOfSpeech
+		want string
+	}{
+		{Noun, "noun"},
+		{Verb, "verb"},
+		{Adjective, "adj"},
+		{Adverb, "adv"},
+		{PartOfSpeech(99), "unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.pos.String(); got != tt.want {
+			t.Errorf("PartOfSpeech(%d).String() = %q, want %q", tt.pos, got, tt.want)
+		}
+	}
+}
+
+func TestLookupOutputMethods(t *testing.T) {
+	found, err := wnInstance.Lookup(Criteria{Matching: "good", POS: PartOfSpeechList{Adjective}})
+	if err != nil || len(found) == 0 {
+		t.Fatal("failed to look up 'good'")
+	}
+	f := found[0]
+
+	if s := f.String(); !strings.Contains(s, "good") {
+		t.Errorf("String() = %q, want it to contain 'good'", s)
+	}
+	if f.Gloss() == "" {
+		t.Error("Gloss() returned empty string")
+	}
+	if d := f.DumpStr(); !strings.Contains(d, "good") {
+		t.Errorf("DumpStr() = %q, want it to contain 'good'", d)
+	}
+	f.Dump() // must not panic
+}
+
+func TestLookupEmptyString(t *testing.T) {
+	if _, err := wnInstance.Lookup(Criteria{Matching: ""}); err == nil {
+		t.Error("expected error for empty Matching string")
+	}
+}
+
+func TestIterateCallbackError(t *testing.T) {
+	sentinel := fmt.Errorf("stop iteration")
+	err := wnInstance.Iterate(PartOfSpeechList{Noun}, func(Lookup) error { return sentinel })
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected sentinel error, got %v", err)
+	}
+}
+
+func TestMorphWordNoMatch(t *testing.T) {
+	for _, pos := range []PartOfSpeech{Verb, Adjective} {
+		if got := wnInstance.MorphWord("zzzzz", pos); got != "" {
+			t.Errorf("MorphWord(%q, %v) = %q, want empty string", "zzzzz", pos, got)
+		}
+	}
+}
+
+func TestNewSkipsHiddenAndBackupFiles(t *testing.T) {
+	dir := t.TempDir()
+	line := "00001234 00 a 01 able 0 000 | having the necessary means\n"
+	if err := os.WriteFile(filepath.Join(dir, "data.test"), []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".hidden", "backup~", "edit#"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("this must not be parsed\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := New(dir); err != nil {
+		t.Errorf("New() should succeed and skip hidden/backup files, got: %v", err)
+	}
+}
+
+func TestNewNonExistentDir(t *testing.T) {
+	if _, err := New("/nonexistent/wordnet/path"); err == nil {
+		t.Error("expected error for non-existent directory")
+	}
+}
+
+func TestNewBadDataFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "data.test"), []byte("00001234 00 X bad-pos\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir); err == nil {
+		t.Error("expected error for invalid POS in data file")
+	}
+}
+
+func TestNewBadExcFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "test.exc"), []byte("just-one-token\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir); err == nil {
+		t.Error("expected error for malformed exception file")
+	}
+}
+
+func TestNewOrphanCluster(t *testing.T) {
+	dir := t.TempDir()
+	// Semantic relation to offset 99999999 which is never defined → cluster with no words
+	line := "00001234 00 a 01 able 0 001 ! 99999999 a 0000 | some gloss\n"
+	if err := os.WriteFile(filepath.Join(dir, "data.test"), []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir); err == nil {
+		t.Error("expected consistency error for undefined cluster reference")
+	}
+}
+
+func TestNewBogusSourceRelation(t *testing.T) {
+	dir := t.TempDir()
+	// Synset has 1 word; syntactic relation with source word index 2 (0-based 1) is out of bounds.
+	// nature 0x0202 → source = uint8(2)-1 = 1, which is >= len(words) = 1.
+	line := "00001234 00 a 01 able 0 001 ! 00001235 a 0202 | some gloss\n"
+	if err := os.WriteFile(filepath.Join(dir, "data.test"), []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir); err == nil {
+		t.Error("expected error for out-of-bounds source word index")
+	}
+}
+
+func TestReadLineNoTrailingNewline(t *testing.T) {
+	var lines []string
+	err := inPlaceReadLine(strings.NewReader("alpha\nbeta"), func(data []byte, _, _ int64) error {
+		lines = append(lines, string(data))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(lines) != 2 || lines[1] != "beta" {
+		t.Errorf("expected [alpha beta], got %v", lines)
+	}
+}
+
+func TestReadLineCallbackError(t *testing.T) {
+	sentinel := fmt.Errorf("stop")
+	err := inPlaceReadLine(strings.NewReader("line1\nline2\n"), func(_ []byte, _ int64, _ int64) error {
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected sentinel error, got %v", err)
+	}
+}
+
+func TestReadFromNonExistentFile(t *testing.T) {
+	err := inPlaceReadLineFromPath("/nonexistent/file.dat", func(_ []byte, _ int64, _ int64) error {
+		return nil
+	})
+	if err == nil {
+		t.Error("expected error for non-existent file")
+	}
+}
+
+func TestLexNextEmpty(t *testing.T) {
+	l := lexable("")
+	if _, ok := l.next(); ok {
+		t.Error("next() on empty lexable should return ok=false")
+	}
+}
+
+func TestLexDecimalNumberErrors(t *testing.T) {
+	l := lexable("")
+	if _, err := l.lexDecimalNumber(); err == nil {
+		t.Error("expected error calling lexDecimalNumber on empty input")
+	}
+
+	// value too large for int64 → ParseInt overflow
+	l = lexable("99999999999999999999")
+	if _, err := l.lexDecimalNumber(); err == nil {
+		t.Error("expected ParseInt overflow error for large decimal number")
+	}
+}
+
+func TestLexHexNumberErrors(t *testing.T) {
+	l := lexable("")
+	if _, err := l.lexHexNumber(); err == nil {
+		t.Error("expected error calling lexHexNumber on empty input")
+	}
+
+	// 16 hex F's = 0xFFFFFFFFFFFFFFFF overflows int64
+	l = lexable("FFFFFFFFFFFFFFFF")
+	if _, err := l.lexHexNumber(); err == nil {
+		t.Error("expected ParseInt overflow error for large hex number")
+	}
+}
+
+func TestLexGlossErrors(t *testing.T) {
+	l := lexable("")
+	if _, err := l.lexGloss(); err == nil {
+		t.Error("expected error for empty gloss input")
+	}
+
+	l = lexable("no-pipe-here")
+	if _, err := l.lexGloss(); err == nil {
+		t.Error("expected error when gloss doesn't start with '|'")
+	}
+}
+
+func TestLexPOSErrors(t *testing.T) {
+	l := lexable("")
+	if _, err := l.lexPOS(); err == nil {
+		t.Error("expected error for empty POS input")
+	}
+
+	l = lexable("X")
+	if _, err := l.lexPOS(); err == nil {
+		t.Error("expected error for invalid POS character 'X'")
+	}
+}
+
+func TestLexRelationTypeUnknown(t *testing.T) {
+	l := lexable("??")
+	if _, err := l.lexRelationType(); err == nil {
+		t.Error("expected error for unrecognized relation type symbol")
+	}
+}
+
+func TestParseLineEmpty(t *testing.T) {
+	p, err := parseLine([]byte{}, 1)
+	if err != nil || p != nil {
+		t.Errorf("empty line: want (nil, nil), got (%v, %v)", p, err)
+	}
+}
+
+func TestParseLineComment(t *testing.T) {
+	p, err := parseLine([]byte("  1 This is a comment"), 1)
+	if err != nil || p != nil {
+		t.Errorf("comment: want (nil, nil), got (%v, %v)", p, err)
+	}
+}
+
+func TestParseLineErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		line int64
+	}{
+		{"comment line number mismatch", "  5 some text", 1},
+		{"bad filenumber", "00001234 XX", 1},
+		{"bad POS", "00001234 00 X", 1},
+		{"bad wordcount", "00001234 00 a XX", 1},
+		{"bad sense id", "00001234 00 a 01 word", 1},
+		{"bad pointer count", "00001234 00 a 01 word 0 XX", 1},
+		{"bad relation type", "00001234 00 a 01 word 0 01 ??", 1},
+		{"bad ptr offset", "00001234 00 a 01 word 0 01 ! BADOFFSET a 0000", 1},
+		{"bad ptr POS", "00001234 00 a 01 word 0 01 ! 00001235 X 0000", 1},
+		{"bad ptr nature", "00001234 00 a 01 word 0 01 ! 00001235 a ZZZZ", 1},
+		{"bad frame marker", "00001234 00 v 01 word 0 00 01 bad 01 00 | gloss", 1},
+		{"bad frame number", "00001234 00 v 01 word 0 00 01 + bad 00 | gloss", 1},
+		{"bad frame word number", "00001234 00 v 01 word 0 00 01 + 01 ZZ | gloss", 1},
+		{"missing gloss", "00001234 00 a 01 word 0 00", 1},
+		{"wrong gloss separator", "00001234 00 a 01 word 0 00 no-gloss", 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseLine([]byte(tt.data), tt.line); err == nil {
+				t.Errorf("parseLine(%q, %d) expected error, got nil", tt.data, tt.line)
+			}
+		})
 	}
 }

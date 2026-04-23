@@ -255,6 +255,9 @@ func parseLine(data []byte, line int64) (*parsed, error) {
 	l := lexable(data)
 
 	l.chomp()
+	if l.empty() {
+		return nil, nil
+	}
 	byteOffset, err := l.lexOffset()
 	if err != nil {
 		// was this a comment line?
